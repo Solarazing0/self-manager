@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#f7f7f4">
+  <title>Self — Сегодня</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <main class="screen" id="home">
+    <div class="day-content">
+      <header class="day-header">
+        <div class="wordmark"><span aria-hidden="true"></span>Self</div>
+        <span class="demo-label">На твоём ПК</span>
+      </header>
+      <nav class="nav" aria-label="Разделы">
+        <button type="button" data-view="day" aria-current="page">Сегодня</button>
+        <button type="button" data-view="inbox">Входящие</button>
+        <button type="button" data-view="work">Планы</button>
+        <button type="button" data-view="memory">Память</button>
+      </nav>
+      <p class="date" id="subtitle"></p>
+      <h1 id="view-title">Сегодня</h1>
+      <p class="notice" id="home-status" role="status" hidden></p>
+      <div id="content"><p class="muted">Загрузка…</p></div>
+    </div>
+    <footer class="dock">
+      <div class="wrap">
+        <button class="legion-entry" id="new-chat" type="button">
+          <span class="legion-mark" aria-hidden="true">L</span>
+          <span class="entry-copy"><strong>Legion</strong><span id="entry-preview">Что у тебя на уме?</span></span>
+          <span class="entry-arrow" aria-hidden="true">↗</span>
+        </button>
+      </div>
+    </footer>
+  </main>
+  <main class="screen chat" id="chat" hidden>
+    <header class="chat-header">
+      <div class="wrap chat-heading">
+        <button type="button" class="icon-button" id="back" aria-label="Назад">←</button>
+        <h1>Legion</h1>
+        <span id="cloud-mode" class="demo-label"></span>
+      </div>
+    </header>
+    <div class="chat-scroll" id="chat-scroll">
+      <div class="wrap chat-history" id="chat-history" role="log" aria-label="История чата"></div>
+      <div class="wrap actions chat-options" id="chat-options"></div>
+    </div>
+    <footer class="dock">
+      <p class="wrap notice" id="chat-status" role="status" hidden></p>
+      <form id="composer" class="wrap composer">
+        <label class="sr-only" for="chat-input">Сообщение для Legion</label>
+        <input id="chat-input" type="text" placeholder="Что у тебя на уме?" enterkeyhint="send" autocomplete="off" maxlength="6000" required>
+        <button class="icon-button" id="dictate" type="button" aria-label="Диктовка" title="Диктовка" hidden>◉</button>
+        <button class="icon-button send" type="submit" aria-label="Отправить сообщение">↑</button>
+      </form>
+    </footer>
+  </main>
+  <dialog id="editor" aria-labelledby="editor-title">
+    <form id="editor-form">
+      <h2 id="editor-title"></h2>
+      <div class="fields" id="fields"></div>
+      <p class="notice" id="form-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" id="close-editor">Назад</button>
+        <button type="submit" class="primary" id="save-editor">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
