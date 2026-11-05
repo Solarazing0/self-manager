@@ -5,6 +5,7 @@ import webPush from 'web-push';
 import { openStore } from '../server/store.js';
 import { createApp } from '../server/http.js';
 import { createPush } from '../server/push.js';
+import { reminders, respondToReminder } from '../server/domain.js';
 
 const contact = 'mailto:test@example.org';
 const subscription = {
@@ -73,6 +74,27 @@ test('push retries temporary failures and removes expired endpoints', async (t) 
   await push.tick();
   assert.equal(calls, 2);
   assert.equal(push.subscription({ action: 'status', endpoint: subscription.endpoint }).subscribed, false);
+});
+
+test('snooze hides only the reminder and allows one new delivery at the selected time', async (t) => {
+  let sent = 0;
+  const { store, push, setTime } = setup(t, { send: () => { sent++; } });
+  const first = '2090-11-06T12:00:00.000Z';
+  const reminder = reminders(store.read(), first)[0];
+  push.subscription({ ...subscription, action: 'add' });
+  await push.tick();
+  store.change((data) => respondToReminder(data, { id: reminder.id, action: 'snooze' }, first));
+  setTime('2090-11-06T12:09:00.000Z');
+  await push.tick();
+  assert.equal(sent, 1);
+  assert.equal(reminders(store.read(), '2090-11-06T12:09:00.000Z').some((item) => item.id === reminder.id), false);
+  const after = '2090-11-06T12:10:00.000Z';
+  setTime(after);
+  assert.ok(reminders(store.read(), after).find((item) => item.id === reminder.id).deliveryId);
+  await push.tick();
+  await push.tick();
+  assert.equal(sent, 2);
+  assert.equal(store.read().inbox[0].status, 'deferred');
 });
 
 test('risk of missing a fixed event raises push urgency without sending event details', async (t) => {

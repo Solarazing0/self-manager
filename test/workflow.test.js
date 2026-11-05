@@ -215,6 +215,30 @@ test('recovery leaves the goal and actual outcome intact and releases time only 
   assert.deepEqual(store.read().tasks[0].slot, slot('10:00', '10:30'));
 });
 
+test('supervision intensity is independent of priority and escalates an unscheduled deadline', async (t) => {
+  const { request, store } = await start(t);
+  const high = await taskFrom(request, 'Важная работа', { ...slot('09:00', '10:00'), priority: 'high', supervision: 'gentle' });
+  const deadline = await taskFrom(request, 'Сдать домашнее задание', { due: at('12:00'), priority: 'low', supervision: 'active' });
+  const lookup = (id, now) => reminders(store.read(), at(now)).find((entry) => entry.taskId === id);
+  assert.equal(lookup(high, '08:45'), undefined);
+  assert.match(lookup(high, '09:00').text, /пора начать/i);
+  assert.match(lookup(deadline, '08:00').text, /в пределах суток/i);
+  assert.match(lookup(deadline, '11:00').text, /часа/i);
+  assert.equal(lookup(deadline, '11:45').urgency, 'high');
+  assert.match(lookup(deadline, '12:00').text, /срок прошёл/i);
+  assert.equal(store.read().tasks.find((task) => task.id === deadline).status, 'ready');
+
+  await request('/api/supervision', { id: high, mode: 'active' });
+  assert.match(lookup(high, '08:45').text, /до начала/i);
+  assert.match(lookup(high, '09:05').text, /начало пока не подтверждено/i);
+  assert.match(lookup(high, '10:00').text, /окно закончилось/i);
+  await request('/api/supervision', { id: high, mode: 'invalid' }, 400);
+  const updated = store.read().tasks.find((task) => task.id === high);
+  assert.equal(updated.priority, 'high');
+  assert.equal(updated.supervision, 'active');
+  assert.equal(store.read().history.findLast((event) => event.target === high).before, 'gentle');
+});
+
 test('cloud failure is retryable and a valid reply creates only a proposal', async (t) => {
   let calls = 0;
   const respond = cloudLegion({

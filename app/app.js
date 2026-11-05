@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const titles = { day: 'Сегодня', inbox: 'Входящие', work: 'Планы', memory: 'Память' };
+const supervisionLabels = { gentle: 'Мягкое', normal: 'Обычное', active: 'Активное' };
 const labels = {
   new: 'К обсуждению', deferred: 'Отложено', planned: 'План согласован', memory: 'В памяти',
   cancelled: 'Отменено', ready: 'Готово к началу', active: 'В процессе', done: 'Выполнено',
@@ -12,6 +13,7 @@ const eventLabels = {
   proposed: 'Предложение', accepted: 'Согласовано', rejected: 'Отклонено', start: 'Начало',
   result: 'Результат', correct: 'Уточнение истории', linked: 'Связь добавлена', unlinked: 'Связь снята',
   merged: 'Работа объединена', unmerged: 'Объединение отменено',
+  supervision: 'Сопровождение изменено',
 };
 let state;
 let view = 'day';
@@ -180,8 +182,9 @@ function renderDay() {
     const open = window ? () => showCommitment(window) : task ? () => showTask(task.id) : () => openChat(item.id);
     content.append(card(task?.title || item?.original || window.title, reminder.text, [
       button('Открыть', open, 'primary'),
+      button('Через 10 мин', () => action('reminders', { id: reminder.id, action: 'snooze' })),
       button('Скрыть', () => action('reminders', { id: reminder.id })),
-    ], reminder.urgency === 'high' ? 'Есть риск опоздания' : ''));
+    ], reminder.urgency === 'high' ? (window ? 'Есть риск опоздания' : 'Срок близко') : ''));
   }
   const entries = [
     ...state.tasks.filter((task) => task.slot && task.status !== 'cancelled')
@@ -262,7 +265,7 @@ function renderWork() {
   for (const pair of state.duplicates) {
     const task = taskById(pair.to);
     content.append(card('Одинаковая работа · ' + task.title,
-      'У двух действий совпадают название, результат, срок, приоритет и зависимости. Связи можно перенести к одному действию.',
+      'У двух действий совпадают название, результат, срок, приоритет, сопровождение и зависимости. Связи можно перенести к одному действию.',
       [button('Сравнить', () => reviewDuplicate(pair))]));
   }
   if (!state.tasks.length) content.append(empty('Здесь появятся действия и проекты после согласования.'));
@@ -361,6 +364,7 @@ function proposalCard(proposal) {
       : !recovery && 'Результат · ' + payload.result,
     slot && 'Окно · ' + stamp(slot.start) + ' → ' + stamp(slot.end),
     payload.due && 'Срок · ' + stamp(payload.due),
+    proposal.type === 'plan' && 'Сопровождение · ' + supervisionLabels[payload.supervision ?? 'normal'],
     move && payload.previousDue && payload.previousDue !== payload.due && 'Прежний срок · ' + stamp(payload.previousDue),
     move && payload.previousDue && !payload.due && 'Предлагается снять срок',
     payload.reason,
@@ -435,6 +439,7 @@ function editPlan(item, draft = {}) {
     field('steps', 'Шаги проекта · один на строку, «шаг | результат»', 'textarea', steps, { maxLength: 8000 }),
     field('due', 'Срок', 'datetime-local', localDate(draft.due)),
     field('priority', 'Приоритет', 'select', draft.priority || 'normal', { choices: [['low', labels.low], ['normal', labels.normal], ['high', labels.high]] }),
+    supervisionField(draft.supervision),
     field('start', 'Начало окна', 'datetime-local', localDate(draft.slot?.start)),
     field('end', 'Конец окна', 'datetime-local', localDate(draft.slot?.end)),
     field('reason', 'Почему этот вариант подходит?', 'textarea', draft.reason || '', { maxLength: 1200 }),
@@ -446,6 +451,19 @@ function editPlan(item, draft = {}) {
     return api('proposals', { ...values, type: 'plan', target: item.id, steps,
       due: toIso(values.due), start: toIso(values.start), end: toIso(values.end) });
   }, 'Создать предложение');
+}
+
+function supervisionField(value = 'normal') {
+  return field('supervision', 'Сопровождение Legion', 'select', value, { choices: Object.entries(supervisionLabels) });
+}
+
+function editSupervision(task) {
+  edit('Настроить сопровождение', [
+    supervisionField(task.supervision),
+    el('p', 'muted', 'Мягкое — напомнит о начале, результате и прошедшем сроке.'),
+    el('p', 'muted', 'Обычное — также спросит о прогрессе перед концом окна и предупредит за час, если срок под угрозой.'),
+    el('p', 'muted', 'Активное — добавит подготовку, повтор при задержке и более ранние предупреждения о сроке.'),
+  ], (values) => api('supervision', { id: task.id, mode: values.supervision }));
 }
 
 function editMove(task, draft = task.slot || {}) {
@@ -589,10 +607,12 @@ function showTask(id) {
     controls.push(button('Добавить следующий шаг', () => editStep(task)));
   }
   if (task.actualEnd && !final(task)) controls.push(button('Исправить историю', () => editResult(task, true)));
+  if (!final(task)) controls.push(button('Сопровождение', () => editSupervision(task)));
   controls.push(button('Добавить связь', () => editRelation(task)), button('Обсудить с Legion', () => openChat(task.itemId)));
   const details = [
     'Результат · ' + task.result,
     labels[task.status] + ' · приоритет ' + labels[task.priority].toLowerCase(),
+    'Сопровождение · ' + supervisionLabels[task.supervision ?? 'normal'],
     task.due && 'Срок · ' + stamp(task.due),
     task.recovery?.nextAction && 'Следующий шаг · ' + task.recovery.nextAction,
     task.recovery?.resumeAt && 'Пауза до ' + stamp(task.recovery.resumeAt),
@@ -616,6 +636,7 @@ function showTask(id) {
 
 function historyLine(entry) {
   const parts = [stamp(entry.at), eventLabels[entry.type] || entry.type, authorName(entry.by)];
+  if (entry.type === 'supervision') parts.push(supervisionLabels[entry.before] + ' → ' + supervisionLabels[entry.after]);
   if (entry.before?.status && entry.after?.status) parts.push(labels[entry.before.status] + ' → ' + labels[entry.after.status]);
   if (entry.before?.outcome) parts.push('Было «' + entry.before.outcome + '»');
   if (entry.after?.outcome) parts.push('Записано «' + entry.after.outcome + '»');

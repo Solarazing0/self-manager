@@ -150,6 +150,7 @@ function normalizePlan(body) {
     reason: optional(body.reason, 'Обоснование', 1200),
     due: body.due ? instant(body.due, 'Срок') : null,
     priority: ['low', 'normal', 'high'].includes(body.priority) ? body.priority : 'normal',
+    supervision: supervisionMode(body.supervision),
     slot: body.start || body.end ? interval(body.start, body.end) : null,
     steps: steps.map((step) => ({
       title: required(step?.title, 'Название шага', 200),
@@ -159,6 +160,24 @@ function normalizePlan(body) {
   if (plan.steps.length && plan.slot) throw new InputError('Время нужно назначать отдельным шагам.');
   if (plan.due && plan.slot?.end > plan.due) throw new InputError('Окно заканчивается после срока.');
   return plan;
+}
+
+const supervisionModes = ['gentle', 'normal', 'active'];
+
+function supervisionMode(value = 'normal') {
+  if (!supervisionModes.includes(value)) throw new InputError('Выбери режим сопровождения.');
+  return value;
+}
+
+export function setSupervision(data, taskId, value) {
+  const task = find(data.tasks, taskId);
+  if (finalStatuses.includes(task.status)) throw new InputError('Задача уже закрыта.', 409);
+  if (value === undefined) throw new InputError('Выбери режим сопровождения.');
+  const before = task.supervision ?? 'normal';
+  const after = supervisionMode(value);
+  if (before === after) return;
+  task.supervision = after;
+  event(data, 'supervision', taskId, { before, after });
 }
 
 const movableStatuses = ['ready', 'active', 'partial', 'missed'];
@@ -266,7 +285,9 @@ export function propose(data, body, by = 'user') {
     if (!['ready', 'partial', 'missed'].includes(parent.status) || parent.slot || parent.recovery?.strategy === 'pause') {
       throw new InputError('Добавление шага доступно в открытом проекте без собственного окна.', 409);
     }
-    payload = normalizePlan({ ...body, steps: [], priority: parent.priority, due: body.due || parent.due });
+    payload = normalizePlan({
+      ...body, steps: [], priority: parent.priority, supervision: parent.supervision, due: body.due || parent.due,
+    });
     if (parent.due && payload.due > parent.due) throw new InputError('Срок шага позже срока проекта.');
     checkSlot(data, payload.slot);
   } else if (body.type === 'move') {
@@ -301,7 +322,8 @@ export function propose(data, body, by = 'user') {
 function makeTask(data, itemId, payload) {
   const task = {
     id: id(), itemId, title: payload.title, result: payload.result, due: payload.due ?? null,
-    priority: payload.priority || 'normal', slot: payload.slot ?? null, status: 'ready',
+    priority: payload.priority || 'normal', supervision: payload.supervision ?? 'normal',
+    slot: payload.slot ?? null, status: 'ready',
     actualStart: null, actualEnd: null, outcome: '', at: isoNow(),
   };
   data.tasks.push(task);
@@ -321,7 +343,9 @@ export function decide(data, proposalId, accepted) {
     checkSlot(data, payload.slot);
     const task = makeTask(data, item.id, payload);
     for (const step of payload.steps) {
-      const child = makeTask(data, item.id, { ...step, due: payload.due, priority: payload.priority });
+      const child = makeTask(data, item.id, {
+        ...step, due: payload.due, priority: payload.priority, supervision: payload.supervision,
+      });
       data.relations.push({ id: id(), type: 'part_of', from: child.id, to: task.id });
     }
     item.status = 'planned';
@@ -554,6 +578,7 @@ function mergeable(data, source, target) {
   return source.id !== target.id && source.status === 'ready' && target.status === 'ready' &&
     !source.slot && !target.slot && !source.actualStart && !target.actualStart && !source.recovery && !target.recovery &&
     source.due === target.due && source.priority === target.priority &&
+    (source.supervision ?? 'normal') === (target.supervision ?? 'normal') &&
     normalized(source.title) === normalized(target.title) && normalized(source.result) === normalized(target.result) &&
     !data.relations.some((edge) => edge.type === 'part_of' && [source.id, target.id].includes(edge.to)) &&
     prerequisites(data, source.id) === prerequisites(data, target.id);
@@ -563,7 +588,7 @@ export function duplicateCandidates(data) {
   const groups = new Map();
   for (const task of data.tasks) {
     if (task.status !== 'ready' || task.slot) continue;
-    const key = JSON.stringify([normalized(task.title), normalized(task.result), task.priority, task.due]);
+    const key = JSON.stringify([normalized(task.title), normalized(task.result), task.priority, task.due, task.supervision ?? 'normal']);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(task);
   }
@@ -640,7 +665,7 @@ export function reminders(data, now = isoNow()) {
   }
   for (const task of data.tasks) {
     if (finalStatuses.includes(task.status)) continue;
-    if (task.recovery?.strategy === 'pause') {
+    if (task.recovery?.strategy === 'pause' && !(task.due && task.due <= now)) {
       if (task.recovery.resumeAt <= now) {
         list.push({
           id: task.id + ':resume:' + task.recovery.resumeAt, taskId: task.id,
@@ -649,33 +674,63 @@ export function reminders(data, now = isoNow()) {
       }
       continue;
     }
-    if (!task.slot) continue;
-    const { start, end } = task.slot;
-    if (task.actualEnd && task.actualEnd >= start) continue;
-    let phase;
-    let text;
-    if (end <= now) {
-      phase = 'result';
-      text = 'Окно закончилось. Уточни, что получилось, или выбери перенос.';
-    } else if (start <= now && task.status !== 'active') {
-      phase = 'start';
-      text = 'Пора начать, если ты готов.';
-    } else if (task.status === 'active' && +new Date(end) - +new Date(now) <= 300_000) {
-      phase = 'progress';
-      text = 'Окно скоро закончится. Как продвигается работа?';
-    } else if (task.status !== 'active' && task.priority === 'high' && now < start &&
-      +new Date(start) - +new Date(now) <= 600_000) {
-      phase = 'prepare';
-      text = 'Скоро начнётся важная задача. У тебя всё готово?';
-    }
-    if (phase) list.push({ id: task.id + ':' + phase + ':' + start + ':' + end, taskId: task.id, text });
+    const reminder = taskReminder(task, now);
+    if (reminder) list.push(reminder);
   }
   for (const window of data.windows) {
     const reminder = travelReminder(window, now);
     if (reminder) list.push(reminder);
   }
   const dismissed = new Set(data.dismissed);
-  return list.filter((entry) => !dismissed.has(entry.id));
+  return list.filter((entry) => !dismissed.has(entry.id) && !(data.snoozed?.[entry.id] > now))
+    .map((entry) => {
+      const snoozedUntil = data.snoozed?.[entry.id];
+      return snoozedUntil ? { ...entry, deliveryId: entry.id + ':snoozed:' + snoozedUntil } : entry;
+    }).sort((a, b) => Number(b.urgency === 'high') - Number(a.urgency === 'high'));
+}
+
+function taskReminder(task, now) {
+  const { slot, due, status, actualEnd, supervision = 'normal' } = task;
+  const minute = 60_000;
+  const current = +new Date(now);
+  const active = status === 'active';
+  const reminder = (phase, timeKey, text, urgency = 'normal') => ({
+    id: [task.id, phase, timeKey].join(':'), taskId: task.id, text, urgency,
+  });
+  if (due && due <= now) {
+    return reminder('deadline_passed', due, 'Срок прошёл. Уточни фактический результат или пересмотри план.');
+  }
+  const viableWindow = slot && slot.end > now && slot.end <= due &&
+    !(actualEnd && actualEnd >= slot.start) && (active || slot.start > now);
+  if (due && !viableWindow) {
+    const minutesLeft = (+new Date(due) - current) / minute;
+    if (supervision === 'active' && minutesLeft <= 15) {
+      return reminder('deadline_risk', due, 'До срока осталось не больше 15 минут. Уточни прогресс и проверь, что ещё реально сделать.', 'high');
+    }
+    if (supervision !== 'gentle' && minutesLeft <= 60) {
+      return reminder('deadline_soon', due, 'До срока осталось не больше часа. Проверь, помещается ли работа в оставшееся время.');
+    }
+    if (supervision === 'active' && minutesLeft <= 1440) {
+      return reminder('deadline_review', due, 'Срок в пределах суток. Подтверди ближайший шаг или запланируй время.');
+    }
+  }
+  if (!slot || (actualEnd && actualEnd >= slot.start)) return null;
+  const { start, end } = slot;
+  const key = start + ':' + end;
+  if (end <= now) return reminder('result', key, 'Окно закончилось. Уточни, что получилось, или выбери перенос.');
+  if (start <= now && !active) {
+    if (supervision === 'active' && current - +new Date(start) >= 5 * minute) {
+      return reminder('start_late', key, 'Начало пока не подтверждено. Попробуй небольшой шаг или предложи перенос.');
+    }
+    return reminder('start', key, 'Пора начать, если ты готов.');
+  }
+  if (active && supervision !== 'gentle' && +new Date(end) - current <= 5 * minute) {
+    return reminder('progress', key, 'Окно скоро закончится. Как продвигается работа?');
+  }
+  if (!active && supervision === 'active' && +new Date(start) - current <= 15 * minute) {
+    return reminder('prepare', key, 'До начала осталось не больше 15 минут. Проверь, всё ли готово.');
+  }
+  return null;
 }
 
 function travelReminder(window, now) {
@@ -697,6 +752,15 @@ function travelReminder(window, now) {
   return reminder('prepare', 'Пора начать сборы перед выходом.');
 }
 
-export function dismiss(data, reminderId) {
-  if (reminders(data).some((entry) => entry.id === reminderId)) data.dismissed.push(reminderId);
+export function respondToReminder(data, body, now = isoNow()) {
+  const { id, action = 'dismiss' } = body;
+  if (action !== 'dismiss' && action !== 'snooze') throw new InputError('Неизвестное действие с напоминанием.');
+  if (!reminders(data, now).some((entry) => entry.id === id)) return;
+  if (action === 'snooze') {
+    data.snoozed ??= {};
+    data.snoozed[id] = new Date(+new Date(now) + 10 * 60_000).toISOString();
+  } else {
+    data.dismissed.push(id);
+    if (data.snoozed) delete data.snoozed[id];
+  }
 }

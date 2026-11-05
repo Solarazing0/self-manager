@@ -52,6 +52,10 @@ function dueDeliveries(device, current, now) {
   });
 }
 
+function pendingReminders(data, time) {
+  return reminders(data, new Date(time).toISOString()).map((item) => ({ ...item, id: item.deliveryId ?? item.id }));
+}
+
 export function createPush({
   store, timeZone, quietHours = quietDefault, subject,
   send = webPush.sendNotification, keys = webPush.generateVAPIDKeys, now = Date.now,
@@ -92,10 +96,10 @@ export function createPush({
     const time = now();
     if (quiet(time)) return [];
     const snapshot = store.read();
-    const current = reminders(snapshot, new Date(time).toISOString());
+    const current = pendingReminders(snapshot, time);
     if (!snapshot.push.devices.some((device) => dueDeliveries(device, current, time).length)) return [];
     return store.change((data) => {
-      const latest = reminders(data, new Date(time).toISOString());
+      const latest = pendingReminders(data, time);
       const active = new Set(latest.map((item) => item.id));
       const jobs = [];
       for (const device of data.push.devices) {

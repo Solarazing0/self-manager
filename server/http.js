@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import {
   InputError, capture, changeIntent, propose, decide, saveWindow, removeWindow, recordTravel,
-  recordExecution, reviseMemory, addRelation, removeRelation, reminders, dismiss, suggestSlot,
+  recordExecution, reviseMemory, addRelation, removeRelation, reminders, respondToReminder, suggestSlot, setSupervision,
   duplicateCandidates, mergeTasks, undoMerge,
 } from './domain.js';
 import { createAssistant } from './legion.js';
@@ -31,7 +31,8 @@ const routes = new Map([
   ['/api/memory', (data, body) => reviseMemory(data, body.id, body)],
   ['/api/relations', (data, body) => body.remove ? removeRelation(data, body.id) : addRelation(data, body)],
   ['/api/merge', (data, body) => body.undo ? undoMerge(data, body.id) : mergeTasks(data, body)],
-  ['/api/reminders', (data, body) => dismiss(data, body.id)],
+  ['/api/reminders', respondToReminder],
+  ['/api/supervision', (data, body) => setSupervision(data, body.id, body.mode)],
 ]);
 
 function json(response, status, data) {
@@ -86,9 +87,9 @@ export function createApp({ store, respond = null, timeZone, publicOrigin = '', 
         return;
       }
       if (request.method === 'GET' && path === '/api/state') {
-        const { dismissed, push: privatePush, ...state } = store.read();
+        const { dismissed, snoozed, push: privatePush, ...state } = store.read();
         return json(response, 200, {
-          ...state, reminders: reminders({ ...state, dismissed }), duplicates: duplicateCandidates(state),
+          ...state, reminders: reminders({ ...state, dismissed, snoozed }), duplicates: duplicateCandidates(state),
           cloud: Boolean(respond), timeZone, pushKey: push?.publicKey,
         });
       }
