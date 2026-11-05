@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#f7f7f4">
+  <title>Self — Сегодня</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="screen" id="day-screen" aria-labelledby="day-title">
+    <div class="day-content wrap">
+      <header class="day-header">
+        <div class="wordmark"><span aria-hidden="true"></span>Self</div>
+        <span class="demo-label">Прототип</span>
+      </header>
+      <p id="today-date" class="date"></p>
+      <h1 id="day-title">Сегодня</h1>
+      <ol id="schedule" class="schedule" aria-label="Задания на сегодня"></ol>
+    </div>
+    <footer class="dock">
+      <div class="wrap">
+        <button class="legion-entry" id="open-chat" type="button">
+          <span class="legion-mark" aria-hidden="true">L</span>
+          <span class="entry-copy">
+            <strong>Legion</strong>
+            <span id="entry-preview">После чтения оставь одну заметку о том, что хочешь проверить на практике.</span>
+          </span>
+          <span class="entry-arrow" aria-hidden="true">↗</span>
+        </button>
+      </div>
+    </footer>
+  </main>
+
+  <main class="screen chat" id="chat-screen" aria-labelledby="chat-title" hidden>
+    <header class="chat-header">
+      <div class="wrap chat-heading">
+        <button type="button" class="icon-button" id="back-to-day" aria-label="Назад к экрану дня">←</button>
+        <h1 id="chat-title">Legion</h1>
+        <span class="demo-label">Демо</span>
+      </div>
+    </header>
+    <div class="chat-scroll" id="chat-scroll">
+      <div class="wrap chat-history" id="chat-history" role="log" aria-label="История чата">
+        <p class="chat-date">Сегодня</p>
+        <p class="message message-user"><span class="sr-only">Ты: </span>Хочу выделить время на чтение и сохранить то, что пригодится на практике.</p>
+        <p class="message"><span class="sr-only">Legion: </span>После чтения оставь одну заметку о том, что хочешь проверить на практике.</p>
+      </div>
+    </div>
+    <footer class="dock">
+      <form id="chat-form" class="wrap composer">
+        <label class="sr-only" for="chat-input">Сообщение для Legion</label>
+        <input id="chat-input" type="text" placeholder="Что у тебя на уме?" enterkeyhint="send" autocomplete="off" required>
+        <button class="icon-button send" type="submit" aria-label="Отправить сообщение">↑</button>
+      </form>
+    </footer>
+  </main>
+</body>
+</html>
