@@ -75,6 +75,24 @@ test('push retries temporary failures and removes expired endpoints', async (t) 
   assert.equal(push.subscription({ action: 'status', endpoint: subscription.endpoint }).subscribed, false);
 });
 
+test('risk of missing a fixed event raises push urgency without sending event details', async (t) => {
+  const sent = [];
+  const { store, push, setTime } = setup(t, { send: (...request) => sent.push(request) });
+  store.change((data) => data.windows.push({
+    id: 'window', title: 'Частное событие', start: '2090-11-06T12:20:00.000Z',
+    journey: {
+      prepareAt: '2090-11-06T11:40:00.000Z', leaveAt: '2090-11-06T11:50:00.000Z',
+      lastSafeAt: '2090-11-06T12:00:00.000Z', bufferMinutes: 10,
+    },
+  }));
+  setTime('2090-11-06T11:57:00.000Z');
+  push.subscription({ ...subscription, action: 'add' });
+  await push.tick();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][1], null);
+  assert.equal(sent[0][2].urgency, 'high');
+});
+
 test('API exposes only the public key and rejects push endpoints outside browser providers', async (t) => {
   const { store, push } = setup(t);
   const app = createApp({ store, push, timeZone: 'Europe/Moscow' });

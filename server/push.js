@@ -109,7 +109,11 @@ export function createPush({
           const attempt = (device.deliveries[item.id]?.attempt ?? 0) + 1;
           device.deliveries[item.id] = { attempt, next: time + 30_000, claimId };
         }
-        jobs.push({ deviceId: device.id, subscription: device.subscription, reminderIds: items.map((item) => item.id), claimId });
+        jobs.push({
+          deviceId: device.id, subscription: device.subscription,
+          reminderIds: items.map((item) => item.id), claimId,
+          urgency: items.some((item) => item.urgency === 'high') ? 'high' : 'normal',
+        });
       }
       return jobs;
     });
@@ -118,7 +122,7 @@ export function createPush({
   async function deliver(job) {
     let status = 200;
     try {
-      await send(job.subscription, null, { ...options, topic: 'self-reminders' });
+      await send(job.subscription, null, { ...options, topic: 'self-reminders', urgency: job.urgency });
     } catch (error) {
       status = error?.statusCode ?? 0;
     }

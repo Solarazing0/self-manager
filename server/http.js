@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import {
-  InputError, capture, changeIntent, propose, decide, addWindow, removeWindow,
+  InputError, capture, changeIntent, propose, decide, saveWindow, removeWindow, recordTravel,
   recordExecution, reviseMemory, addRelation, removeRelation, reminders, dismiss, suggestSlot,
   duplicateCandidates, mergeTasks, undoMerge,
 } from './domain.js';
@@ -26,7 +26,8 @@ const routes = new Map([
   ['/api/suggestions', suggestSlot],
   ['/api/decisions', (data, body) => decide(data, body.id, body.accepted)],
   ['/api/execution', (data, body) => recordExecution(data, body.id, body)],
-  ['/api/commitments', (data, body) => body.remove ? removeWindow(data, body.id) : addWindow(data, body)],
+  ['/api/commitments', (data, body) => body.remove ? removeWindow(data, body.id, body.version) : saveWindow(data, body)],
+  ['/api/travel', (data, body) => recordTravel(data, body.id, body)],
   ['/api/memory', (data, body) => reviseMemory(data, body.id, body)],
   ['/api/relations', (data, body) => body.remove ? removeRelation(data, body.id) : addRelation(data, body)],
   ['/api/merge', (data, body) => body.undo ? undoMerge(data, body.id) : mergeTasks(data, body)],

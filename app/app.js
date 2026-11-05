@@ -172,19 +172,24 @@ function renderDay() {
   content.append(el('div', 'actions', date, button('Сегодня', () => {
     chosenDay = '';
     renderHome();
-  }), button('Занятое окно', editCommitment)));
+  }), button('Занятое окно', () => editCommitment())));
   for (const reminder of state.reminders) {
     const task = taskById(reminder.taskId);
     const item = itemById(reminder.itemId);
-    content.append(card(task?.title || item.original, reminder.text, [
-      button('Открыть', () => task ? showTask(task.id) : openChat(item.id), 'primary'),
+    const window = state.windows.find((entry) => entry.id === reminder.windowId);
+    const open = window ? () => showCommitment(window) : task ? () => showTask(task.id) : () => openChat(item.id);
+    content.append(card(task?.title || item?.original || window.title, reminder.text, [
+      button('Открыть', open, 'primary'),
       button('Скрыть', () => action('reminders', { id: reminder.id })),
-    ]));
+    ], reminder.urgency === 'high' ? 'Есть риск опоздания' : ''));
   }
   const entries = [
     ...state.tasks.filter((task) => task.slot && task.status !== 'cancelled')
       .map((task) => ({ ...task.slot, title: task.title, task })),
-    ...state.windows,
+    ...state.windows.flatMap((window) => window.journey ? [
+      { title: 'Сборы и дорога · ' + window.title, start: window.journey.prepareAt, end: window.start, window, travel: true },
+      { ...window, window },
+    ] : [{ ...window, window }]),
   ].filter((entry) => dayKey(entry.start) <= day && dayKey(+new Date(entry.end) - 1) >= day)
     .sort((a, b) => a.start.localeCompare(b.start));
   if (day === dayKey(new Date()) && entries.length) {
@@ -203,10 +208,11 @@ function renderDay() {
   list.setAttribute('aria-label', 'Расписание дня');
   for (const entry of entries) {
     const task = entry.task;
-    const name = button(entry.title, () => task ? showTask(task.id) : showCommitment(entry), 'task-title');
+    const name = button(entry.title, () => task ? showTask(task.id) : showCommitment(entry.window), 'task-title');
     const badge = el('span', 'now', 'Сейчас');
     name.prepend(badge);
-    name.append(el('span', 'meta', task ? labels[task.status] : 'Обязательство'));
+    const detail = entry.travel ? 'Выйти в ' + clock(entry.window.journey.leaveAt) : 'Обязательство';
+    name.append(el('span', 'meta', task ? labels[task.status] : detail));
     const from = dayKey(entry.start) < day ? '00:00' : clock(entry.start);
     const to = dayKey(entry.end) > day ? '24:00' : clock(entry.end);
     const row = el('li', 'task', name, el('span', 'task-time', from + '–' + to));
@@ -469,17 +475,64 @@ function editSuggestion(task) {
   }, 'Предложить окно');
 }
 
-function editCommitment() {
-  edit('Добавить занятое окно', [
-    field('title', 'Что запланировано?', 'text', '', { required: true, maxLength: 200 }),
-    field('start', 'Начало', 'datetime-local', '', { required: true }),
-    field('end', 'Окончание', 'datetime-local', '', { required: true }),
-  ], (values) => api('commitments', { ...values, start: toIso(values.start), end: toIso(values.end) }));
+function editCommitment(entry) {
+  const journey = entry?.journey;
+  const minutes = (name, label) => field(name, label, 'number', String(journey?.[name] ?? 0), { min: 0, max: 720, step: 1, required: true });
+  edit(entry ? 'Изменить занятое окно' : 'Добавить занятое окно', [
+    field('title', 'Что запланировано?', 'text', entry?.title || '', { required: true, maxLength: 200 }),
+    field('start', 'Начало', 'datetime-local', localDate(entry?.start), { required: true }),
+    field('end', 'Окончание', 'datetime-local', localDate(entry?.end), { required: true }),
+    minutes('preparationMinutes', 'Сборы, минут'),
+    minutes('travelMinutes', 'Дорога, минут'),
+    minutes('bufferMinutes', 'Запас, минут'),
+    el('p', 'muted', 'Оставь три нуля, если напоминания о дороге не нужны.'),
+  ], (values) => api('commitments', {
+    ...values, id: entry?.id, version: entry?.version, start: toIso(values.start), end: toIso(values.end),
+    preparationMinutes: Number(values.preparationMinutes), travelMinutes: Number(values.travelMinutes),
+    bufferMinutes: Number(values.bufferMinutes),
+  }), 'Подтвердить окно');
 }
 
 function showCommitment(entry) {
-  edit(entry.title, [el('p', '', stamp(entry.start) + ' → ' + stamp(entry.end))],
-    () => api('commitments', { id: entry.id, remove: true }), 'Убрать занятое окно');
+  const details = [el('p', '', stamp(entry.start) + ' → ' + stamp(entry.end))];
+  const controls = [
+    button('Изменить', () => editCommitment(entry)),
+    button('Убрать', () => edit('Убрать занятое окно?', [el('p', '', entry.title)],
+      () => api('commitments', { id: entry.id, version: entry.version, remove: true }), 'Подтвердить удаление')),
+  ];
+  const facts = { departed: 'Вышел', arrived: 'Добрался', missed: 'Не добрался' };
+  if (entry.journey) {
+    const { prepareAt, leaveAt, lastSafeAt } = entry.journey;
+    details.push(
+      el('p', '', 'Начать сборы · ' + stamp(prepareAt)),
+      el('p', '', 'Выйти с запасом · ' + stamp(leaveAt)),
+      el('p', '', 'Расчётный крайний выход · ' + stamp(lastSafeAt)),
+    );
+    const fact = entry.travelFact;
+    if (fact) details.push(el('p', 'meta', facts[fact.status] + ' · ' + stamp(fact.at)));
+    for (const [status, label] of Object.entries(facts)) {
+      if (status === fact?.status || (status === 'departed' && fact)) continue;
+      controls.push(button(label, () => edit('Зафиксировать: ' + label.toLowerCase(), [
+        field('at', 'Когда?', 'datetime-local', '', {}),
+      ], (values) => api('travel', { id: entry.id, version: entry.version, status, at: toIso(values.at) }))));
+    }
+  }
+  const history = state.history.filter((record) => record.target === entry.id);
+  if (history.length) {
+    const showWindow = (window) => window.title + ' · ' + stamp(window.start) + ' → ' + stamp(window.end) +
+      (window.journey ? ' · выход ' + stamp(window.journey.leaveAt) : '');
+    const rows = history.toReversed().map((record) => {
+      const { before, after } = record;
+      const when = stamp(record.at) + ' · ';
+      if (record.type === 'travel_fact') {
+        const previous = before ? facts[before.status] + ' в ' + stamp(before.at) + ' → ' : '';
+        return el('li', '', when + previous + facts[after.status] + ' в ' + stamp(after.at));
+      }
+      return el('li', '', when + (before ? showWindow(before) + ' → ' : 'Добавлено · ') + showWindow(after));
+    });
+    details.push(el('details', '', el('summary', '', 'История'), el('ol', 'history', ...rows)));
+  }
+  edit(entry.title, [...details, el('div', 'actions', ...controls)], null);
 }
 
 function showTask(id) {

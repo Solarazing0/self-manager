@@ -127,11 +127,15 @@ export function reviseMemory(data, memoryId, body) {
   event(data, 'memory', memoryId, { before, after: { text: entry.text, status: entry.status } });
 }
 
+export function occupiedWindow(window) {
+  return { start: window.journey?.prepareAt ?? window.start, end: window.end };
+}
+
 function checkSlot(data, slot, except) {
   if (!slot) return;
   const overlap = (other) => other.start < slot.end && slot.start < other.end;
   const conflict = data.tasks.find((task) => task.id !== except && task.status !== 'cancelled' && task.slot && overlap(task.slot));
-  const commitment = data.windows.find(overlap);
+  const commitment = data.windows.find((entry) => entry.id !== except && overlap(occupiedWindow(entry)));
   if (conflict || commitment) {
     throw new InputError('Это окно пересекается с записью «' + (conflict || commitment).title + '».', 409);
   }
@@ -198,7 +202,7 @@ export function suggestSlot(data, body) {
     }
   }
   const occupied = [
-    ...data.windows,
+    ...data.windows.map(occupiedWindow),
     ...data.tasks.filter((entry) => entry.slot && entry.id !== task.id && entry.status !== 'cancelled')
       .map((entry) => entry.slot),
   ].sort((first, second) => first.start.localeCompare(second.start));
@@ -319,15 +323,68 @@ export function decide(data, proposalId, accepted) {
   return proposal;
 }
 
-export function addWindow(data, body) {
-  const window = { id: id(), title: required(body.title, 'Название', 200), ...interval(body.start, body.end) };
-  checkSlot(data, window);
-  data.windows.push(window);
-  event(data, 'commitment', window.id, { after: window });
+function journeyFor(start, body) {
+  const { preparationMinutes = 0, travelMinutes = 0, bufferMinutes = 0 } = body;
+  if (![preparationMinutes, travelMinutes, bufferMinutes].every((value) =>
+    Number.isInteger(value) && value >= 0 && value <= 720)) {
+    throw new InputError('Длительность должна быть целым числом от 0 до 720 минут.');
+  }
+  if (!travelMinutes) {
+    if (preparationMinutes || bufferMinutes) throw new InputError('Укажи продолжительность дороги.');
+    return null;
+  }
+  const beforeStart = (minutes) => new Date(+new Date(start) - minutes * 60_000).toISOString();
+  return {
+    preparationMinutes, travelMinutes, bufferMinutes,
+    prepareAt: beforeStart(preparationMinutes + travelMinutes + bufferMinutes),
+    leaveAt: beforeStart(travelMinutes + bufferMinutes),
+    lastSafeAt: beforeStart(travelMinutes),
+  };
 }
 
-export function removeWindow(data, windowId) {
+export function saveWindow(data, body) {
+  const before = body.id ? find(data.windows, body.id) : null;
+  if (before && before.version !== body.version) {
+    throw new InputError('Обязательство уже изменилось. Открой его снова.', 409);
+  }
+  const time = interval(body.start, body.end);
+  const journey = journeyFor(time.start, body);
+  const sameJourney = before && before.start === time.start &&
+    before.journey?.prepareAt === journey?.prepareAt && before.journey?.leaveAt === journey?.leaveAt &&
+    before.journey?.lastSafeAt === journey?.lastSafeAt;
+  const window = {
+    id: before?.id ?? id(), version: id(), title: required(body.title, 'Название', 200), ...time,
+    journey, travelFact: sameJourney ? before.travelFact ?? null : null,
+  };
+  checkSlot(data, occupiedWindow(window), window.id);
+  if (before) data.windows[data.windows.indexOf(before)] = window;
+  else data.windows.push(window);
+  event(data, before ? 'changed_commitment' : 'commitment', window.id, { before, after: window });
+  return window;
+}
+
+export function recordTravel(data, windowId, body) {
   const window = find(data.windows, windowId);
+  if (!window.journey || !['departed', 'arrived', 'missed'].includes(body.status)) {
+    throw new InputError('Выбери фактическое состояние дороги.');
+  }
+  if (body.version !== window.version) throw new InputError('Обязательство уже изменилось. Открой его снова.', 409);
+  const before = window.travelFact;
+  if (before?.status === body.status) return window;
+  if (body.status === 'departed' && before) throw new InputError('Результат дороги уже известен.', 409);
+  const now = isoNow();
+  const at = body.at ? instant(body.at, 'Время отметки') : now;
+  if (at > now) throw new InputError('Фактическое время ещё не наступило.');
+  const after = { status: body.status, at };
+  window.travelFact = after;
+  window.version = id();
+  event(data, 'travel_fact', windowId, { before, after });
+  return window;
+}
+
+export function removeWindow(data, windowId, version) {
+  const window = find(data.windows, windowId);
+  if (version !== window.version) throw new InputError('Обязательство уже изменилось. Открой его снова.', 409);
   data.windows = data.windows.filter((entry) => entry.id !== windowId);
   event(data, 'removed_commitment', windowId, { before: window });
 }
@@ -551,8 +608,31 @@ export function reminders(data, now = isoNow()) {
     }
     if (phase) list.push({ id: task.id + ':' + phase + ':' + start + ':' + end, taskId: task.id, text });
   }
+  for (const window of data.windows) {
+    const reminder = travelReminder(window, now);
+    if (reminder) list.push(reminder);
+  }
   const dismissed = new Set(data.dismissed);
   return list.filter((entry) => !dismissed.has(entry.id));
+}
+
+function travelReminder(window, now) {
+  const journey = window.journey;
+  const fact = window.travelFact?.status;
+  if (!journey || fact === 'arrived' || fact === 'missed' || now < journey.prepareAt) return null;
+  const reminder = (phase, text, urgency = 'normal') => ({
+    id: [window.id, phase, window.start, journey.prepareAt, journey.leaveAt, journey.lastSafeAt].join(':'),
+    windowId: window.id, text, urgency,
+  });
+  if (now >= window.start) return reminder('arrival', 'Обязательство началось. Уточни, получилось ли добраться.');
+  if (fact === 'departed') return null;
+  if (now > journey.lastSafeAt) return reminder('delay', 'Расчётное время выхода прошло. Проверь маршрут и отметь, что произошло.', 'high');
+  const warningMinutes = Math.min(5, Math.ceil(journey.bufferMinutes / 2));
+  if (+new Date(now) >= +new Date(journey.lastSafeAt) - warningMinutes * 60_000) {
+    return reminder('risk', 'Скоро закончится запас времени. Если ещё не вышел, лучше выйти сейчас.', 'high');
+  }
+  if (now >= journey.leaveAt) return reminder('leave', 'Пора выходить, чтобы сохранить запас на дорогу.');
+  return reminder('prepare', 'Пора начать сборы перед выходом.');
 }
 
 export function dismiss(data, reminderId) {

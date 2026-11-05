@@ -1,4 +1,4 @@
-import { InputError, find, isoNow, message, propose } from './domain.js';
+import { InputError, find, isoNow, message, occupiedWindow, propose } from './domain.js';
 
 const instructions = [
   'Ты Legion, инициативный персональный менеджер Self-Manager. Отвечай по-русски, кратко, на «ты».',
@@ -78,7 +78,8 @@ function contextFor(data, itemId, timeZone) {
     tasks: data.tasks.filter((task) => !['done', 'cancelled', 'merged'].includes(task.status))
       .filter((task) => task.itemId === itemId || task.slot?.end >= now || task.due >= now)
       .slice(-30).map(({ id, title, result, due, slot, status }) => ({ id, title, result, due, slot, status })),
-    commitments: data.windows.filter((window) => window.end >= now).slice(-30),
+    commitments: data.windows.filter((window) => window.end >= now).slice(-30)
+      .map((window) => ({ title: window.title, ...occupiedWindow(window), eventStart: window.start })),
     confirmedMemory: data.memory.filter((entry) => entry.status === 'confirmed')
       .slice(-12).map((entry) => entry.text),
   };

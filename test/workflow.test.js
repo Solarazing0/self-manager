@@ -132,6 +132,47 @@ test('dependency cycles and schedule conflicts are enforced at the point of chan
   assert.equal((await request('/api/state')).tasks[1].status, 'active');
 });
 
+test('a fixed event reserves preparation and travel and escalates before the last safe departure', async (t) => {
+  const { request, store } = await start(t);
+  const lecture = {
+    title: 'Лекция', ...slot('09:00', '10:00'),
+    preparationMinutes: 15, travelMinutes: 20, bufferMinutes: 10,
+  };
+  const event = await request('/api/commitments', lecture);
+  assert.equal(event.journey.prepareAt, at('08:15'));
+  assert.equal(event.journey.leaveAt, at('08:30'));
+  assert.equal(event.journey.lastSafeAt, at('08:40'));
+  const thought = await capture(request, 'Задача до лекции');
+  await request('/api/proposals', draft(thought.itemId, slot('08:10', '08:20')), 409);
+  const task = await taskFrom(request, 'Свободное дело');
+  const suggested = await request('/api/suggestions', { target: task, minutes: 15, ...slot('08:05', '10:30') });
+  assert.equal(suggested.payload.start, at('10:00'));
+
+  const travel = (time) => reminders(store.read(), at(time)).filter((entry) => entry.windowId === event.id);
+  assert.deepEqual(travel('08:14'), []);
+  assert.match(travel('08:15')[0].text, /сборы/);
+  assert.match(travel('08:30')[0].text, /выходить/);
+  const risk = travel('08:35')[0];
+  assert.equal(risk.urgency, 'high');
+  assert.equal(risk.windowId, event.id);
+  assert.match(travel('08:41')[0].text, /прошло/);
+  assert.match(travel('09:05')[0].text, /уточни/i);
+  assert.equal(store.read().windows[0].travelFact, null);
+
+  await request('/api/travel', { id: event.id, version: event.version, status: 'departed', at: at('08:37') }, 400);
+  const departed = await request('/api/travel', { id: event.id, version: event.version, status: 'departed' });
+  assert.deepEqual(travel('08:39'), []);
+  assert.match(travel('09:00')[0].text, /добраться/);
+  await request('/api/commitments', { ...lecture, id: event.id, version: event.version }, 409);
+  const arrived = await request('/api/travel', { id: event.id, version: departed.version, status: 'arrived' });
+  assert.deepEqual(travel('09:05'), []);
+  const renamed = await request('/api/commitments', { ...lecture, title: 'Семинар', id: event.id, version: arrived.version });
+  assert.equal(renamed.travelFact.status, 'arrived');
+  const rescheduled = await request('/api/commitments', { ...lecture, ...slot('11:00', '12:00'), id: event.id, version: renamed.version });
+  assert.equal(rescheduled.travelFact, null);
+  assert.equal(store.read().history.filter((entry) => entry.type === 'travel_fact').length, 2);
+});
+
 test('cloud failure is retryable and a valid reply creates only a proposal', async (t) => {
   let calls = 0;
   const respond = cloudLegion({
