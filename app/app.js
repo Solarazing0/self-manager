@@ -71,6 +71,7 @@ async function refresh() {
   if (version !== refreshVersion) return;
   if (state && JSON.stringify(state) === JSON.stringify(next)) return;
   state = next;
+  updatePushToggle();
   render();
 }
 
@@ -720,4 +721,65 @@ setInterval(() => { if (!document.hidden) void sync(); }, 15_000);
 setInterval(updateClock, 1000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) void sync(); });
 window.addEventListener('online', sync);
-if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => {});
+const pushToggle = $('#push-toggle');
+let pushRegistration;
+let pushActive = false;
+
+function updatePushToggle() {
+  pushToggle.hidden = !state?.pushKey || !pushRegistration || !('PushManager' in window) || !('Notification' in window);
+  pushToggle.textContent = pushActive ? 'Уведомления вкл.' : 'Уведомления выкл.';
+  pushToggle.setAttribute('aria-pressed', String(pushActive));
+}
+
+async function checkPush() {
+  const current = await pushRegistration.pushManager.getSubscription();
+  if (!current) {
+    pushActive = false;
+  } else {
+    const { subscribed } = await api('push', { action: 'status', endpoint: current.endpoint });
+    pushActive = subscribed;
+  }
+  updatePushToggle();
+}
+
+pushToggle.addEventListener('click', async () => {
+  if (!pushRegistration || !state?.pushKey || pushToggle.disabled) return;
+  const status = $('#home-status');
+  const disable = pushActive;
+  pushToggle.disabled = true;
+  notice(status);
+  try {
+    if (!disable && await Notification.requestPermission() !== 'granted') {
+      throw new Error('Разреши уведомления для Self-Manager в настройках браузера.');
+    }
+    let current = await pushRegistration.pushManager.getSubscription();
+    if (disable) {
+      if (current) {
+        await api('push', { action: 'remove', endpoint: current.endpoint });
+        pushActive = false;
+        await current.unsubscribe();
+      } else pushActive = false;
+      notice(status, 'Фоновые уведомления на этом устройстве выключены.');
+      return;
+    }
+    current ??= await pushRegistration.pushManager.subscribe({
+      userVisibleOnly: true, applicationServerKey: state.pushKey,
+    });
+    await api('push', { action: 'add', ...current.toJSON() });
+    pushActive = true;
+    notice(status, 'Фоновые уведомления на этом устройстве включены.');
+  } catch (error) {
+    notice(status, error.message || 'Не удалось изменить уведомления.');
+  } finally {
+    pushToggle.disabled = false;
+    updatePushToggle();
+  }
+});
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).then((registration) => {
+    pushRegistration = registration;
+    updatePushToggle();
+    if ('PushManager' in window) return checkPush();
+  }).catch(() => {});
+}

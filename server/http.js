@@ -61,7 +61,7 @@ async function readBody(request) {
   }
 }
 
-export function createApp({ store, respond = null, timeZone, publicOrigin = '' }) {
+export function createApp({ store, respond = null, timeZone, publicOrigin = '', push = null }) {
   const assist = createAssistant(store, respond, timeZone);
   const external = publicOrigin ? new URL(publicOrigin) : null;
   if (external && (external.protocol !== 'https:' || publicOrigin !== external.origin)) {
@@ -85,13 +85,13 @@ export function createApp({ store, respond = null, timeZone, publicOrigin = '' }
         return;
       }
       if (request.method === 'GET' && path === '/api/state') {
-        const { dismissed, ...state } = store.read();
+        const { dismissed, push: privatePush, ...state } = store.read();
         return json(response, 200, {
           ...state, reminders: reminders({ ...state, dismissed }), duplicates: duplicateCandidates(state),
-          cloud: Boolean(respond), timeZone,
+          cloud: Boolean(respond), timeZone, pushKey: push?.publicKey,
         });
       }
-      if (request.method === 'POST' && (routes.has(path) || path === '/api/assist')) {
+      if (request.method === 'POST' && (routes.has(path) || path === '/api/assist' || path === '/api/push')) {
         const origin = request.headers.origin;
         const allowed = hosts.slice(0, 3).map((host) => 'http://' + host);
         if (external) allowed.push(external.origin);
@@ -99,6 +99,10 @@ export function createApp({ store, respond = null, timeZone, publicOrigin = '' }
           throw new InputError('Запрос пришёл с другого сайта.', 403);
         }
         const body = await readBody(request);
+        if (path === '/api/push') {
+          if (!push) throw new InputError('Фоновые уведомления недоступны.', 503);
+          return json(response, 200, { result: push.subscription(body) });
+        }
         const result = path === '/api/assist' ? await assist(body.id) : store.change((data) => routes.get(path)(data, body));
         return json(response, 200, { result });
       }
