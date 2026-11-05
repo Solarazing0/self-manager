@@ -321,7 +321,8 @@ function renderChat() {
       log.append(proposalCard(proposal));
     }
   }
-  for (const proposal of state.proposals.filter((entry) => entry.target === itemId && !seen.has(entry.id))) {
+  for (const proposal of state.proposals.filter((entry) =>
+    !seen.has(entry.id) && (entry.target === itemId || taskById(entry.target)?.itemId === itemId))) {
     log.append(proposalCard(proposal));
   }
   const latest = entries.findLast((entry) => entry.role === 'user');
@@ -352,16 +353,22 @@ function renderChat() {
 function proposalCard(proposal) {
   const payload = proposal.payload;
   const move = proposal.type === 'move';
-  const task = taskById(move ? proposal.target : proposal.taskId);
+  const recovery = payload.recovery;
+  const task = taskById(move || recovery ? proposal.target : proposal.taskId);
   const slot = move ? payload : payload.slot;
   const details = [
     move ? (payload.previous ? 'Было ' + stamp(payload.previous.start) + '–' + clock(payload.previous.end) : 'Раньше без окна')
-      : 'Результат · ' + payload.result,
+      : !recovery && 'Результат · ' + payload.result,
     slot && 'Окно · ' + stamp(slot.start) + ' → ' + stamp(slot.end),
     payload.due && 'Срок · ' + stamp(payload.due),
     move && payload.previousDue && payload.previousDue !== payload.due && 'Прежний срок · ' + stamp(payload.previousDue),
     move && payload.previousDue && !payload.due && 'Предлагается снять срок',
     payload.reason,
+    recovery?.nextAction && 'Следующий шаг · ' + recovery.nextAction,
+    recovery?.resumeAt && 'Вернуться · ' + stamp(recovery.resumeAt),
+    recovery?.strategy === 'pause' && payload.previous.slot &&
+      'Освободится окно · ' + stamp(payload.previous.slot.start) + ' → ' + stamp(payload.previous.slot.end),
+    recovery?.reason,
     ...(payload.steps || []).map((step) => '• ' + step.title + ' · ' + step.result),
   ].filter(Boolean).join('\n');
   const controls = [];
@@ -375,7 +382,9 @@ function proposalCard(proposal) {
     if (proposal.type === 'step') controls.push(button('Уточнить шаг', () => editStep(taskById(proposal.target), payload)));
   }
   if (task) controls.push(button('К задаче', () => showTask(task.id)));
-  const title = move ? (payload.previous ? 'Перенос' : 'Новое окно') + ' · ' + task.title : payload.title;
+  let title = payload.title;
+  if (move) title = (payload.previous ? 'Перенос' : 'Новое окно') + ' · ' + task.title;
+  if (recovery) title = (recovery.strategy === 'pause' ? 'Пауза' : 'Упрощение') + ' · ' + task.title;
   return card(title, details, controls, labels[proposal.status] + ' · ' + authorName(proposal.by));
 }
 
@@ -475,6 +484,23 @@ function editSuggestion(task) {
   }, 'Предложить окно');
 }
 
+function editRecovery(task, strategy) {
+  const pause = strategy === 'pause';
+  const fields = [
+    el('p', 'muted', pause
+      ? 'После подтверждения текущее окно освободится. Результат и срок задачи сохранятся.'
+      : 'Запиши действие, с которого проще продолжить. Согласованный результат задачи сохранится.'),
+    pause
+      ? field('resumeAt', 'Когда вернуться?', 'datetime-local', localDate(Date.now() + 30 * 60_000), { required: true })
+      : field('nextAction', 'Посильный следующий шаг', 'textarea', task.recovery?.nextAction || '', { required: true, maxLength: 1200 }),
+    field('reason', 'Что мешает продолжить?', 'textarea', '', { required: true, maxLength: 1200 }),
+  ];
+  edit(pause ? 'Предложить паузу' : 'Упростить следующий шаг', fields, async (values) => {
+    await api('proposals', { ...values, type: 'recover', target: task.id, strategy, resumeAt: toIso(values.resumeAt) });
+    if (chat.hidden) view = 'work';
+  }, 'Создать предложение');
+}
+
 function editCommitment(entry) {
   const journey = entry?.journey;
   const minutes = (name, label) => field(name, label, 'number', String(journey?.[name] ?? 0), { min: 0, max: 720, step: 1, required: true });
@@ -547,14 +573,19 @@ function showTask(id) {
   const children = state.relations.filter((edge) => edge.type === 'part_of' && edge.to === task.id);
   const controls = [];
   if (['ready', 'partial', 'missed'].includes(task.status) && !children.length) {
-    controls.push(button('Начать', () => changeTask('execution', { id, action: 'start' }, id), 'primary'));
+    const start = task.recovery?.strategy === 'pause' ? 'Начать сейчас' : 'Начать';
+    controls.push(
+      button(start, () => changeTask('execution', { id, action: 'start' }, id), 'primary'),
+      button('Упростить шаг', () => editRecovery(task, 'simplify')),
+      button('Предложить паузу', () => editRecovery(task, 'pause')),
+    );
   }
   controls.push(button(final(task) ? 'Уточнить факты' : 'Указать результат', () => editResult(task, final(task))));
   if (!final(task) && !children.length) controls.push(
     button(task.slot ? 'Предложить перенос' : 'Выбрать время', () => editMove(task)),
     button('Найти свободное окно', () => editSuggestion(task)),
   );
-  if (['ready', 'partial', 'missed'].includes(task.status) && !task.slot) {
+  if (['ready', 'partial', 'missed'].includes(task.status) && !task.slot && task.recovery?.strategy !== 'pause') {
     controls.push(button('Добавить следующий шаг', () => editStep(task)));
   }
   if (task.actualEnd && !final(task)) controls.push(button('Исправить историю', () => editResult(task, true)));
@@ -563,6 +594,8 @@ function showTask(id) {
     'Результат · ' + task.result,
     labels[task.status] + ' · приоритет ' + labels[task.priority].toLowerCase(),
     task.due && 'Срок · ' + stamp(task.due),
+    task.recovery?.nextAction && 'Следующий шаг · ' + task.recovery.nextAction,
+    task.recovery?.resumeAt && 'Пауза до ' + stamp(task.recovery.resumeAt),
     task.slot && 'План · ' + stamp(task.slot.start) + ' → ' + stamp(task.slot.end),
     task.actualStart && 'Начато · ' + stamp(task.actualStart),
     task.actualEnd && 'Результат записан · ' + stamp(task.actualEnd),
@@ -590,6 +623,11 @@ function historyLine(entry) {
   if (proposal?.type === 'move') {
     if (proposal.payload.previous) parts.push('Было ' + stamp(proposal.payload.previous.start));
     parts.push('Предложено ' + stamp(proposal.payload.start));
+  }
+  if (proposal?.type === 'recover') {
+    const { recovery, previous } = proposal.payload;
+    if (previous.slot) parts.push('Исходное окно ' + stamp(previous.slot.start));
+    parts.push(recovery.nextAction || 'Пауза до ' + stamp(recovery.resumeAt), recovery.reason);
   }
   return el('li', '', parts.join(' · '));
 }

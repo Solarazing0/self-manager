@@ -173,6 +173,48 @@ test('a fixed event reserves preparation and travel and escalates before the las
   assert.equal(store.read().history.filter((entry) => entry.type === 'travel_fact').length, 2);
 });
 
+test('recovery leaves the goal and actual outcome intact and releases time only on acceptance', async (t) => {
+  const { request, store } = await start(t);
+  const item = await capture(request, 'Домашнее задание');
+  const plan = await request('/api/proposals', {
+    ...draft(item.itemId, slot('09:00', '09:45')), title: 'Домашнее задание', result: 'Решения отправлены', due: at('16:00'),
+  });
+  const { taskId: id } = await request('/api/decisions', { id: plan.id, accepted: true });
+  await request('/api/execution', { id, action: 'start', at: at('09:00') });
+  const simplify = {
+    type: 'recover', target: id, strategy: 'simplify', nextAction: 'Проверить первый пример', reason: 'Устал',
+  };
+  await request('/api/proposals', simplify, 409);
+  await request('/api/execution', { id, action: 'result', status: 'partial', at: at('09:20'), outcome: 'Прочитал условие' });
+  const easier = await request('/api/proposals', simplify);
+  assert.equal(store.read().tasks[0].recovery, undefined);
+  await request('/api/decisions', { id: easier.id, accepted: true });
+  assert.equal(store.read().tasks[0].recovery.nextAction, simplify.nextAction);
+  assert.equal(store.read().tasks[0].result, 'Решения отправлены');
+  const pause = {
+    type: 'recover', target: id, strategy: 'pause', resumeAt: at('10:00'), reason: 'Нужен перерыв',
+  };
+  await request('/api/proposals', { ...pause, resumeAt: at('16:00') }, 400);
+  const rejected = await request('/api/proposals', pause);
+  await request('/api/decisions', { id: rejected.id, accepted: false });
+  assert.deepEqual(store.read().tasks[0].slot, slot('09:00', '09:45'));
+  const proposed = await request('/api/proposals', pause);
+  assert.deepEqual(store.read().tasks[0].slot, slot('09:00', '09:45'));
+  await request('/api/decisions', { id: proposed.id, accepted: true });
+  const paused = store.read().tasks[0];
+  assert.equal(paused.slot, null);
+  assert.equal(paused.status, 'partial');
+  assert.equal(paused.due, at('16:00'));
+  assert.equal(paused.outcome, 'Прочитал условие');
+  assert.deepEqual(proposed.payload.previous.slot, slot('09:00', '09:45'));
+  assert.equal(reminders(store.read(), at('09:59')).length, 0);
+  assert.match(reminders(store.read(), at('10:00'))[0].text, /пауза закончилась/i);
+  const move = await request('/api/proposals', { type: 'move', target: id, ...slot('10:00', '10:30') });
+  await request('/api/decisions', { id: move.id, accepted: true });
+  assert.equal(store.read().tasks[0].recovery, null);
+  assert.deepEqual(store.read().tasks[0].slot, slot('10:00', '10:30'));
+});
+
 test('cloud failure is retryable and a valid reply creates only a proposal', async (t) => {
   let calls = 0;
   const respond = cloudLegion({

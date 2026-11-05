@@ -9,6 +9,9 @@ const instructions = [
   'Для большого проекта предложи до трёх ближайших шагов; проект с шагами оставь без окна.',
   'Время предлагай с явным смещением, с учётом текущей даты, часового пояса, срока и занятых окон.',
   'Если пользователь хочет перенести существующую задачу, используй draft типа move с её ID.',
+  'Для упрощения следующего шага или паузы в незавершённой задаче используй draft типа recover с её ID.',
+  'Для recover укажи strategy: simplify и nextAction либо strategy: pause и resumeAt с явным смещением. Объясни reason.',
+  'Упрощение сохраняет согласованный результат. Если задача в процессе, сначала попроси зафиксировать фактический результат.',
   'Ты только предлагаешь. Не утверждай, что создал задачу, поменял расписание или подтвердил результат.',
   'При отклонении предложи реалистичный перенос, отдых или упрощение. Не считай молчание результатом.',
 ].join('\n');
@@ -23,9 +26,10 @@ const schema = {
     draft: {
       type: ['object', 'null'],
       additionalProperties: false,
-      required: ['type', 'taskId', 'title', 'result', 'reason', 'due', 'start', 'end', 'priority', 'steps'],
+      required: ['type', 'taskId', 'title', 'result', 'reason', 'due', 'start', 'end', 'priority', 'steps',
+        'strategy', 'nextAction', 'resumeAt'],
       properties: {
-        type: { type: 'string', enum: ['plan', 'move'] },
+        type: { type: 'string', enum: ['plan', 'move', 'recover'] },
         taskId: field(['string', 'null']),
         title: field(['string', 'null']),
         result: field(['string', 'null']),
@@ -33,6 +37,9 @@ const schema = {
         due: field(['string', 'null']),
         start: field(['string', 'null']),
         end: field(['string', 'null']),
+        strategy: { type: ['string', 'null'], enum: ['simplify', 'pause', null] },
+        nextAction: field(['string', 'null']),
+        resumeAt: field(['string', 'null']),
         priority: { type: 'string', enum: ['low', 'normal', 'high'] },
         steps: {
           type: 'array',
@@ -77,7 +84,8 @@ function contextFor(data, itemId, timeZone) {
       .slice(-16).map(({ role, text }) => ({ role, text })),
     tasks: data.tasks.filter((task) => !['done', 'cancelled', 'merged'].includes(task.status))
       .filter((task) => task.itemId === itemId || task.slot?.end >= now || task.due >= now)
-      .slice(-30).map(({ id, title, result, due, slot, status }) => ({ id, title, result, due, slot, status })),
+      .slice(-30).map(({ id, title, result, due, slot, status, outcome, recovery }) =>
+        ({ id, title, result, due, slot, status, outcome, recovery })),
     commitments: data.windows.filter((window) => window.end >= now).slice(-30)
       .map((window) => ({ title: window.title, ...occupiedWindow(window), eventStart: window.start })),
     confirmedMemory: data.memory.filter((entry) => entry.status === 'confirmed')
@@ -116,21 +124,22 @@ export function createAssistant(store, respond, timeZone) {
         if (answer.draft) {
           try {
             const draft = answer.draft;
-            if (draft.type === 'move') {
+            const taskDraft = ['move', 'recover'].includes(draft.type);
+            if (taskDraft) {
               const before = snapshot.tasks.find((task) => task.id === draft.taskId);
               const after = data.tasks.find((task) => task.id === draft.taskId);
-              const moveFor = (state) => state.proposals.findLast((proposal) =>
-                proposal.type === 'move' && proposal.target === draft.taskId);
+              const recentFor = (state) => state.proposals.findLast((proposal) =>
+                ['move', 'recover'].includes(proposal.type) && proposal.target === draft.taskId);
               if (!before || JSON.stringify(before) !== JSON.stringify(after) ||
-                JSON.stringify(moveFor(snapshot)) !== JSON.stringify(moveFor(data))) {
-                throw new InputError('Задача или предложение переноса изменились.');
+                JSON.stringify(recentFor(snapshot)) !== JSON.stringify(recentFor(data))) {
+                throw new InputError('Задача или предложение изменились.');
               }
             } else if (JSON.stringify(item) !== JSON.stringify(find(data.inbox, itemId)) ||
               JSON.stringify(proposed(data)) !== planBefore) {
               throw new InputError('Намерение или черновик изменились за время ответа.');
             }
             proposalId = propose(data, {
-              ...draft, due: draft.due ?? undefined, target: draft.type === 'move' ? draft.taskId : itemId,
+              ...draft, due: draft.due ?? undefined, target: taskDraft ? draft.taskId : itemId,
             }, 'legion').id;
           } catch (error) {
             if (!(error instanceof InputError)) throw error;

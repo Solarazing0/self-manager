@@ -163,6 +163,40 @@ function normalizePlan(body) {
 
 const movableStatuses = ['ready', 'active', 'partial', 'missed'];
 
+function recoveryState(task) {
+  const { slot, status, due, actualStart, actualEnd, outcome, recovery = null } = task;
+  return { slot, status, due, actualStart, actualEnd, outcome, recovery };
+}
+
+function checkRecovery(data, task, recovery) {
+  if (!['ready', 'partial', 'missed'].includes(task.status) ||
+    data.relations.some((edge) => edge.type === 'part_of' && edge.to === task.id)) {
+    throw new InputError('Выбери незавершённый шаг. Если он начат, сначала запиши фактический результат.', 409);
+  }
+  if (recovery.strategy !== 'pause') return;
+  if (recovery.resumeAt <= isoNow()) throw new InputError('Укажи будущее время возвращения.');
+  if (task.due && recovery.resumeAt >= task.due) throw new InputError('Вернуться нужно до срока задачи.');
+  const blocksScheduled = data.relations.some((edge) => {
+    if (edge.type !== 'blocked_by' || edge.to !== task.id) return false;
+    const dependent = find(data.tasks, edge.from);
+    return dependent.slot && !finalStatuses.includes(dependent.status);
+  });
+  if (blocksScheduled) throw new InputError('Сначала пересмотри расписание зависимых задач.', 409);
+}
+
+function recoveryDraft(data, task, body) {
+  const { strategy } = body;
+  if (!['simplify', 'pause'].includes(strategy)) throw new InputError('Выбери упрощение или паузу.');
+  const recovery = {
+    strategy,
+    nextAction: strategy === 'simplify' ? required(body.nextAction, 'Следующий шаг', 1200) : null,
+    resumeAt: strategy === 'pause' ? instant(body.resumeAt, 'Время возвращения') : null,
+    reason: required(body.reason, 'Причина', 1200),
+  };
+  checkRecovery(data, task, recovery);
+  return { recovery, previous: recoveryState(task) };
+}
+
 function checkTaskSlot(data, task, slot) {
   if (task.due && slot.end > task.due) throw new InputError('Окно заканчивается после срока.');
   for (const edge of data.relations.filter((entry) => entry.type === 'blocked_by' && touches(entry, task.id))) {
@@ -229,7 +263,7 @@ export function propose(data, body, by = 'user') {
     checkSlot(data, payload.slot);
   } else if (body.type === 'step') {
     const parent = find(data.tasks, body.target);
-    if (!['ready', 'partial', 'missed'].includes(parent.status) || parent.slot) {
+    if (!['ready', 'partial', 'missed'].includes(parent.status) || parent.slot || parent.recovery?.strategy === 'pause') {
       throw new InputError('Добавление шага доступно в открытом проекте без собственного окна.', 409);
     }
     payload = normalizePlan({ ...body, steps: [], priority: parent.priority, due: body.due || parent.due });
@@ -251,6 +285,8 @@ export function propose(data, body, by = 'user') {
     };
     if (due !== task.due) required(payload.reason, 'Причина изменения срока', 1200);
     checkTaskSlot(data, { ...task, due }, payload);
+  } else if (body.type === 'recover') {
+    payload = recoveryDraft(data, find(data.tasks, body.target), body);
   } else {
     throw new InputError('Неизвестное предложение.');
   }
@@ -294,7 +330,7 @@ export function decide(data, proposalId, accepted) {
   }
   if (accepted && proposal.type === 'step') {
     const parent = find(data.tasks, proposal.target);
-    if (!['ready', 'partial', 'missed'].includes(parent.status) || parent.slot) {
+    if (!['ready', 'partial', 'missed'].includes(parent.status) || parent.slot || parent.recovery?.strategy === 'pause') {
       throw new InputError('Проект изменился. Проверь план.', 409);
     }
     checkSlot(data, proposal.payload.slot);
@@ -316,6 +352,19 @@ export function decide(data, proposalId, accepted) {
     checkTaskSlot(data, { ...task, due }, { start, end });
     task.slot = { start, end };
     task.due = due;
+    if (task.recovery?.strategy === 'pause') task.recovery = null;
+    archivePending(data, 'recover', task.id);
+  }
+  if (accepted && proposal.type === 'recover') {
+    const task = find(data.tasks, proposal.target);
+    const { recovery, previous } = proposal.payload;
+    if (JSON.stringify(recoveryState(task)) !== JSON.stringify(previous)) {
+      throw new InputError('Задача изменилась. Составь новое предложение восстановления.', 409);
+    }
+    checkRecovery(data, task, recovery);
+    task.recovery = recovery;
+    if (recovery.strategy === 'pause') task.slot = null;
+    archivePending(data, 'move', task.id);
   }
   proposal.status = status;
   proposal.decidedAt = isoNow();
@@ -406,6 +455,7 @@ export function recordExecution(data, taskId, body) {
     task.actualStart = body.at ? instant(body.at, 'Начало') : isoNow();
     task.actualEnd = null;
     task.status = 'active';
+    if (task.recovery?.strategy === 'pause') task.recovery = null;
   } else if (body.action === 'result' || body.action === 'correct') {
     if (!['done', 'partial', 'missed', 'cancelled'].includes(body.status)) {
       throw new InputError('Выбери фактический результат.');
@@ -437,6 +487,7 @@ export function recordExecution(data, taskId, body) {
   }
   if (finalStatuses.includes(task.status)) archivePending(data, 'move', task.id);
   if (finalStatuses.includes(task.status)) archivePending(data, 'step', task.id);
+  archivePending(data, 'recover', task.id);
   const after = { status: task.status, actualStart: task.actualStart, actualEnd: task.actualEnd, outcome: task.outcome };
   event(data, body.action, task.id, { before, after });
 }
@@ -467,8 +518,8 @@ export function addRelation(data, body, relationId = id()) {
     throw new InputError('Выбери разные задачи и допустимую связь.');
   }
   if (data.relations.some((edge) => edge.type === type && edge.from === from && edge.to === to)) return;
-  if (type === 'part_of' && find(data.tasks, to).slot) {
-    throw new InputError('У родительской задачи есть время в расписании.', 409);
+  if (type === 'part_of' && (target.slot || target.recovery?.strategy === 'pause')) {
+    throw new InputError('Сними паузу или освободи окно родительской задачи.', 409);
   }
   if (type === 'blocked_by' && source.slot && !finalStatuses.includes(source.status) && target.status !== 'done' &&
     (!target.slot || target.slot.end > source.slot.start)) {
@@ -501,7 +552,7 @@ function prerequisites(data, taskId) {
 
 function mergeable(data, source, target) {
   return source.id !== target.id && source.status === 'ready' && target.status === 'ready' &&
-    !source.slot && !target.slot && !source.actualStart && !target.actualStart &&
+    !source.slot && !target.slot && !source.actualStart && !target.actualStart && !source.recovery && !target.recovery &&
     source.due === target.due && source.priority === target.priority &&
     normalized(source.title) === normalized(target.title) && normalized(source.result) === normalized(target.result) &&
     !data.relations.some((edge) => edge.type === 'part_of' && [source.id, target.id].includes(edge.to)) &&
@@ -552,6 +603,7 @@ export function mergeTasks(data, body) {
     before, after, targetEdges: data.relations.filter((edge) => touches(edge, target.id)),
   };
   archivePending(data, 'move', source.id);
+  archivePending(data, 'recover', source.id);
   event(data, 'merged', source.id, { taskId: target.id, before, after });
 }
 
@@ -587,7 +639,17 @@ export function reminders(data, now = isoNow()) {
     }
   }
   for (const task of data.tasks) {
-    if (!task.slot || finalStatuses.includes(task.status)) continue;
+    if (finalStatuses.includes(task.status)) continue;
+    if (task.recovery?.strategy === 'pause') {
+      if (task.recovery.resumeAt <= now) {
+        list.push({
+          id: task.id + ':resume:' + task.recovery.resumeAt, taskId: task.id,
+          text: 'Пауза закончилась. Выбери посильный шаг или новое окно.',
+        });
+      }
+      continue;
+    }
+    if (!task.slot) continue;
     const { start, end } = task.slot;
     if (task.actualEnd && task.actualEnd >= start) continue;
     let phase;
